@@ -33,6 +33,11 @@ exports/private/
 *.docx
 *.epub
 
+# local MCP verification outputs
+mcp-bridge/*test-output*.json
+mcp-bridge/*.local.json
+mcp-bridge/*.private.json
+
 # dependencies and build outputs
 node_modules/
 dist/
@@ -41,6 +46,8 @@ coverage/
 .next/
 .vite/
 .turbo/
+__pycache__/
+*.pyc
 
 # OS/editor
 .DS_Store
