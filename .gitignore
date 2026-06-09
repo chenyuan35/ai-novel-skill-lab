@@ -1,0 +1,49 @@
+# secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.token
+*secret*
+*credential*
+
+# local databases and backups
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+.ai_novel_backup/
+
+# logs and runtime state
+*.log
+logs/
+.ai_novel_bridge/logs/
+.cache/
+.tmp/
+tmp/
+
+# generated/private prose by default
+exports/drafts/
+exports/private/
+*.docx
+*.epub
+
+# dependencies and build outputs
+node_modules/
+dist/
+build/
+coverage/
+.next/
+.vite/
+.turbo/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
