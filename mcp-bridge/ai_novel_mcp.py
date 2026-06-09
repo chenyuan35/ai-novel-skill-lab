@@ -1482,6 +1482,221 @@ def tool_book_analysis_export(args):
     return {"analysisId": analysis_id, "format": fmt, "contentType": content_type, "content": _clip(raw, int(args.get("previewChars", 6000)))}
 
 
+def tool_style_list_profiles(args):
+    limit = int(args.get("limit", 20))
+    status = args.get("status") or "active"
+    if not args.get("offline") and find_base_url():
+        data = _unwrap(_api("GET", "/api/style-profiles", timeout=12))
+        if isinstance(data, list):
+            items = data[:limit]
+            if status:
+                items = [item for item in items if str(item.get("status", "active")) == status]
+            return {"source": "api", "items": items, "count": len(items)}
+        return {"source": "api", "data": data}
+    with _db_connect(read_only=True) as conn:
+        where = ""
+        params = ()
+        if status:
+            where = "status = ?"
+            params = (status,)
+        rows = _db_fetch_limited(
+            conn,
+            "StyleProfile",
+            ["id", "name", "description", "category", "tagsJson", "applicableGenresJson", "sourceType", "sourceRefId", "extractedFeaturesJson", "selectedExtractionPresetKey", "analysisMarkdown", "status", "updatedAt"],
+            where,
+            params,
+            "updatedAt desc",
+            limit,
+        )
+        for row in rows:
+            row["bindingCount"] = _db_count(conn, "StyleBinding", "styleProfileId = ? and enabled = 1", (row["id"],))
+            row["antiAiRuleCount"] = _db_count(conn, "StyleProfileAntiAiRule", "styleProfileId = ? and enabled = 1", (row["id"],))
+            if "analysisMarkdown" in row:
+                row["analysisMarkdownPreview"] = _clip(row.pop("analysisMarkdown"), int(args.get("previewChars", 800)))
+    return {"source": "sqlite_readonly", "items": rows, "count": len(rows)}
+
+
+def tool_style_get_profile(args):
+    profile_id = (args.get("styleProfileId") or "").strip()
+    if not profile_id:
+        raise RuntimeError("styleProfileId 不能为空。")
+    if not args.get("offline") and find_base_url():
+        data = _unwrap(_api("GET", f"/api/style-profiles/{urllib.parse.quote(profile_id)}", timeout=12))
+        return {"source": "api", "styleProfile": data}
+    with _db_connect(read_only=True) as conn:
+        rows = _db_fetch_limited(
+            conn,
+            "StyleProfile",
+            ["id", "name", "description", "category", "tagsJson", "applicableGenresJson", "sourceType", "sourceRefId", "sourceContent", "extractedFeaturesJson", "extractionPresetsJson", "extractionAntiAiRuleKeysJson", "selectedExtractionPresetKey", "analysisMarkdown", "narrativeRulesJson", "characterRulesJson", "languageRulesJson", "rhythmRulesJson", "status", "createdAt", "updatedAt"],
+            "id = ?",
+            (profile_id,),
+            None,
+            1,
+        )
+        if not rows:
+            raise RuntimeError("Style profile not found.")
+        profile = rows[0]
+        preview_chars = int(args.get("previewChars", 1200))
+        for key in ("sourceContent", "analysisMarkdown"):
+            if key in profile and profile[key] is not None:
+                profile[key + "Preview"] = _clip(profile.pop(key), preview_chars)
+        bindings = _db_fetch_limited(
+            conn,
+            "StyleBinding",
+            ["id", "styleProfileId", "targetType", "targetId", "priority", "weight", "enabled", "createdAt", "updatedAt"],
+            "styleProfileId = ?",
+            (profile_id,),
+            "updatedAt desc",
+            20,
+        )
+        anti_bindings = _db_fetch_limited(
+            conn,
+            "StyleProfileAntiAiRule",
+            ["id", "styleProfileId", "antiAiRuleId", "enabled", "weight", "createdAt", "updatedAt"],
+            "styleProfileId = ?",
+            (profile_id,),
+            "updatedAt desc",
+            20,
+        )
+    return {"source": "sqlite_readonly", "styleProfile": profile, "bindings": bindings, "antiAiBindings": anti_bindings}
+
+
+def tool_style_list_bindings(args):
+    limit = int(args.get("limit", 30))
+    if not args.get("offline") and find_base_url():
+        query = {}
+        for key in ("targetType", "targetId", "styleProfileId"):
+            if args.get(key):
+                query[key] = args.get(key)
+        path = "/api/style-bindings"
+        if query:
+            path += "?" + urllib.parse.urlencode(query)
+        data = _unwrap(_api("GET", path, timeout=12))
+        if isinstance(data, list):
+            return {"source": "api", "items": data[:limit], "count": len(data)}
+        return {"source": "api", "data": data}
+    where = []
+    params = []
+    for key, column in (("targetType", "targetType"), ("targetId", "targetId"), ("styleProfileId", "styleProfileId")):
+        if args.get(key):
+            where.append(f"{column} = ?")
+            params.append(args.get(key))
+    with _db_connect(read_only=True) as conn:
+        rows = _db_fetch_limited(
+            conn,
+            "StyleBinding",
+            ["id", "styleProfileId", "targetType", "targetId", "priority", "weight", "enabled", "createdAt", "updatedAt"],
+            " and ".join(where),
+            tuple(params),
+            "updatedAt desc",
+            limit,
+        )
+    return {"source": "sqlite_readonly", "items": rows, "count": len(rows)}
+
+
+def tool_style_bind(args):
+    _ensure_backend_for_write(args)
+    body = {
+        "styleProfileId": args.get("styleProfileId"),
+        "targetType": args.get("targetType"),
+        "targetId": args.get("targetId"),
+        "priority": int(args.get("priority", 1)),
+        "weight": float(args.get("weight", 1)),
+        "enabled": bool(args.get("enabled", True)),
+    }
+    if not body["styleProfileId"] or not body["targetType"] or not body["targetId"]:
+        raise RuntimeError("styleProfileId、targetType、targetId 不能为空。")
+    data = _unwrap(_api("POST", "/api/style-bindings", body, timeout=int(args.get("timeoutSeconds", 45))))
+    return {"created": True, "binding": data}
+
+
+def tool_style_create_from_text(args):
+    _ensure_backend_for_write(args)
+    body = {"name": args.get("name"), "sourceText": args.get("sourceText")}
+    if args.get("category"):
+        body["category"] = args.get("category")
+    for key in ("provider", "model", "temperature"):
+        if key in args and args[key] is not None:
+            body[key] = args[key]
+    if not body.get("name") or not str(body.get("sourceText") or "").strip():
+        raise RuntimeError("name 和 sourceText 不能为空。")
+    data = _unwrap(_api("POST", "/api/style-profiles/from-text", body, timeout=int(args.get("timeoutSeconds", 120))))
+    return {"created": True, "styleProfile": data}
+
+
+def tool_style_create_from_brief(args):
+    _ensure_backend_for_write(args)
+    body = {"brief": args.get("brief")}
+    for key in ("name", "category", "provider", "model", "temperature"):
+        if key in args and args[key] is not None:
+            body[key] = args[key]
+    if not str(body.get("brief") or "").strip():
+        raise RuntimeError("brief 不能为空。")
+    data = _unwrap(_api("POST", "/api/style-profiles/from-brief", body, timeout=int(args.get("timeoutSeconds", 90))))
+    return {"created": True, "styleProfile": data}
+
+
+def tool_style_create_from_book_analysis(args):
+    _ensure_backend_for_write(args)
+    body = {"bookAnalysisId": args.get("analysisId") or args.get("bookAnalysisId"), "name": args.get("name")}
+    for key in ("provider", "model", "temperature"):
+        if key in args and args[key] is not None:
+            body[key] = args[key]
+    if not body.get("bookAnalysisId") or not body.get("name"):
+        raise RuntimeError("analysisId/bookAnalysisId 和 name 不能为空。")
+    data = _unwrap(_api("POST", "/api/style-profiles/from-book-analysis", body, timeout=int(args.get("timeoutSeconds", 120))))
+    return {"created": True, "styleProfile": data}
+
+
+def tool_anti_ai_rules(args):
+    limit = int(args.get("limit", 80))
+    if not args.get("offline") and find_base_url():
+        data = _unwrap(_api("GET", "/api/anti-ai-rules", timeout=12))
+        if isinstance(data, list):
+            return {"source": "api", "items": data[:limit], "count": len(data)}
+        return {"source": "api", "data": data}
+    with _db_connect(read_only=True) as conn:
+        rows = _db_fetch_limited(
+            conn,
+            "AntiAiRule",
+            ["id", "key", "name", "type", "severity", "description", "detectPatternsJson", "rewriteSuggestion", "promptInstruction", "autoRewrite", "enabled", "globalBaselineEnabled", "updatedAt"],
+            "",
+            (),
+            "updatedAt desc",
+            limit,
+        )
+    return {"source": "sqlite_readonly", "items": rows, "count": len(rows)}
+
+
+def tool_style_detect(args):
+    _ensure_backend_for_write(args)
+    content = args.get("content") or ""
+    if not str(content).strip():
+        raise RuntimeError("content 不能为空。")
+    body = {"content": str(content)}
+    for key in ("styleProfileId", "novelId", "chapterId", "taskStyleProfileId", "previewAntiAiRuleIds", "provider", "model", "temperature"):
+        if key in args and args[key] is not None:
+            body[key] = args[key]
+    data = _unwrap(_api("POST", "/api/style-detection/check", body, timeout=int(args.get("timeoutSeconds", 90))))
+    return {"checked": True, "result": data}
+
+
+def tool_style_rewrite(args):
+    _ensure_backend_for_write(args)
+    content = args.get("content") or ""
+    issues = args.get("issues") or []
+    if not str(content).strip():
+        raise RuntimeError("content 不能为空。")
+    if not issues:
+        raise RuntimeError("issues 不能为空。")
+    body = {"content": str(content), "issues": issues}
+    for key in ("styleProfileId", "novelId", "chapterId", "taskStyleProfileId", "previewAntiAiRuleIds", "provider", "model", "temperature"):
+        if key in args and args[key] is not None:
+            body[key] = args[key]
+    data = _unwrap(_api("POST", "/api/style-detection/rewrite", body, timeout=int(args.get("timeoutSeconds", 120))))
+    return {"rewritten": True, "result": data}
+
+
 def tool_update_chapter_brief(args):
     _ensure_backend_for_write(args)
     novel_id = _novel_id(args)
@@ -2247,6 +2462,172 @@ TOOLS = {
             },
         },
         "handler": tool_book_analysis_export,
+    },
+    "ai_novel_style_list_profiles": {
+        "description": "List style profiles with source, extraction, binding, and anti-AI counts; read-only and offline-capable.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "default": "active"},
+                "limit": {"type": "integer", "default": 20},
+                "previewChars": {"type": "integer", "default": 800},
+                "offline": {"type": "boolean", "default": False},
+            },
+        },
+        "handler": tool_style_list_profiles,
+    },
+    "ai_novel_style_get_profile": {
+        "description": "Read style profile detail, rules, feature metadata, bindings, and anti-AI bindings.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["styleProfileId"],
+            "properties": {
+                "styleProfileId": {"type": "string"},
+                "previewChars": {"type": "integer", "default": 1200},
+                "offline": {"type": "boolean", "default": False},
+            },
+        },
+        "handler": tool_style_get_profile,
+    },
+    "ai_novel_style_list_bindings": {
+        "description": "List style bindings for novel/chapter/task targets.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "styleProfileId": {"type": "string"},
+                "targetType": {"type": "string", "enum": ["novel", "chapter", "task"]},
+                "targetId": {"type": "string"},
+                "limit": {"type": "integer", "default": 30},
+                "offline": {"type": "boolean", "default": False},
+            },
+        },
+        "handler": tool_style_list_bindings,
+    },
+    "ai_novel_style_bind": {
+        "description": "Bind a style profile to a novel, chapter, or task target.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["styleProfileId", "targetType", "targetId"],
+            "properties": {
+                "styleProfileId": {"type": "string"},
+                "targetType": {"type": "string", "enum": ["novel", "chapter", "task"]},
+                "targetId": {"type": "string"},
+                "priority": {"type": "integer", "default": 1},
+                "weight": {"type": "number", "default": 1},
+                "enabled": {"type": "boolean", "default": True},
+                "timeoutSeconds": {"type": "integer", "default": 45},
+                "autoStart": {"type": "boolean", "default": True},
+            },
+        },
+        "handler": tool_style_bind,
+    },
+    "ai_novel_style_create_from_text": {
+        "description": "Create a style profile from sample text using AI Novel Style Engine.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["name", "sourceText"],
+            "properties": {
+                "name": {"type": "string"},
+                "sourceText": {"type": "string"},
+                "category": {"type": "string"},
+                "provider": {"type": "string"},
+                "model": {"type": "string"},
+                "temperature": {"type": "number"},
+                "timeoutSeconds": {"type": "integer", "default": 120},
+                "autoStart": {"type": "boolean", "default": True},
+            },
+        },
+        "handler": tool_style_create_from_text,
+    },
+    "ai_novel_style_create_from_brief": {
+        "description": "Create a style profile from a natural-language style brief.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["brief"],
+            "properties": {
+                "brief": {"type": "string"},
+                "name": {"type": "string"},
+                "category": {"type": "string"},
+                "provider": {"type": "string"},
+                "model": {"type": "string"},
+                "temperature": {"type": "number"},
+                "timeoutSeconds": {"type": "integer", "default": 90},
+                "autoStart": {"type": "boolean", "default": True},
+            },
+        },
+        "handler": tool_style_create_from_brief,
+    },
+    "ai_novel_style_create_from_book_analysis": {
+        "description": "Create a style profile from a completed book-analysis result.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["analysisId", "name"],
+            "properties": {
+                "analysisId": {"type": "string"},
+                "bookAnalysisId": {"type": "string"},
+                "name": {"type": "string"},
+                "provider": {"type": "string"},
+                "model": {"type": "string"},
+                "temperature": {"type": "number"},
+                "timeoutSeconds": {"type": "integer", "default": 120},
+                "autoStart": {"type": "boolean", "default": True},
+            },
+        },
+        "handler": tool_style_create_from_book_analysis,
+    },
+    "ai_novel_anti_ai_rules": {
+        "description": "List anti-AI style rules and global baseline flags.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 80},
+                "offline": {"type": "boolean", "default": False},
+            },
+        },
+        "handler": tool_anti_ai_rules,
+    },
+    "ai_novel_style_detect": {
+        "description": "Check content against style profile and anti-AI rules.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["content"],
+            "properties": {
+                "content": {"type": "string"},
+                "styleProfileId": {"type": "string"},
+                "novelId": {"type": "string"},
+                "chapterId": {"type": "string"},
+                "taskStyleProfileId": {"type": "string"},
+                "previewAntiAiRuleIds": {"type": "array", "items": {"type": "string"}},
+                "provider": {"type": "string"},
+                "model": {"type": "string"},
+                "temperature": {"type": "number"},
+                "timeoutSeconds": {"type": "integer", "default": 90},
+                "autoStart": {"type": "boolean", "default": True},
+            },
+        },
+        "handler": tool_style_detect,
+    },
+    "ai_novel_style_rewrite": {
+        "description": "Rewrite content through AI Novel Style Engine based on supplied style issues; use for repair, not Claude hand-writing.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["content", "issues"],
+            "properties": {
+                "content": {"type": "string"},
+                "issues": {"type": "array", "items": {"type": "object"}},
+                "styleProfileId": {"type": "string"},
+                "novelId": {"type": "string"},
+                "chapterId": {"type": "string"},
+                "taskStyleProfileId": {"type": "string"},
+                "previewAntiAiRuleIds": {"type": "array", "items": {"type": "string"}},
+                "provider": {"type": "string"},
+                "model": {"type": "string"},
+                "temperature": {"type": "number"},
+                "timeoutSeconds": {"type": "integer", "default": 120},
+                "autoStart": {"type": "boolean", "default": True},
+            },
+        },
+        "handler": tool_style_rewrite,
     },
     "ai_novel_update_chapter_brief": {
         "description": "Update chapter planning fields such as expectation, taskSheet, sceneCards, mustAvoid, targetWordCount.",
