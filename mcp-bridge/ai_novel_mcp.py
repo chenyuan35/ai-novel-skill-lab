@@ -1216,6 +1216,272 @@ def tool_read_ledgers(args):
     }
 
 
+def tool_knowledge_list_documents(args):
+    limit = int(args.get("limit", 20))
+    status = args.get("status")
+    keyword = (args.get("keyword") or "").strip()
+    if not args.get("offline") and find_base_url():
+        query = {}
+        if status:
+            query["status"] = status
+        if keyword:
+            query["keyword"] = keyword
+        path = "/api/knowledge/documents"
+        if query:
+            path += "?" + urllib.parse.urlencode(query)
+        data = _unwrap(_api("GET", path, timeout=12))
+        if isinstance(data, list):
+            return {"source": "api", "items": data[:limit], "count": len(data)}
+        return {"source": "api", "data": data}
+    with _db_connect(read_only=True) as conn:
+        where = []
+        params = []
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        else:
+            where.append("status != ?")
+            params.append("archived")
+        if keyword:
+            where.append("(title like ? or fileName like ?)")
+            params.extend([f"%{keyword}%", f"%{keyword}%"])
+        rows = _db_fetch_limited(
+            conn,
+            "KnowledgeDocument",
+            ["id", "title", "fileName", "status", "activeVersionId", "activeVersionNumber", "latestIndexStatus", "lastIndexedAt", "createdAt", "updatedAt"],
+            " and ".join(where),
+            tuple(params),
+            "updatedAt desc",
+            limit,
+        )
+        for row in rows:
+            row["versionCount"] = _db_count(conn, "KnowledgeDocumentVersion", "documentId = ?", (row["id"],))
+            row["bookAnalysisCount"] = _db_count(conn, "BookAnalysis", "documentId = ?", (row["id"],))
+            row["bindingCount"] = _db_count(conn, "KnowledgeBinding", "documentId = ?", (row["id"],))
+    return {"source": "sqlite_readonly", "items": rows, "count": len(rows)}
+
+
+def tool_knowledge_get_document(args):
+    document_id = (args.get("documentId") or "").strip()
+    if not document_id:
+        raise RuntimeError("documentId 不能为空。")
+    if not args.get("offline") and find_base_url():
+        data = _unwrap(_api("GET", f"/api/knowledge/documents/{urllib.parse.quote(document_id)}", timeout=12))
+        return {"source": "api", "document": data}
+    with _db_connect(read_only=True) as conn:
+        row = _db_fetch_limited(
+            conn,
+            "KnowledgeDocument",
+            ["id", "title", "fileName", "status", "activeVersionId", "activeVersionNumber", "latestIndexStatus", "lastIndexedAt", "createdAt", "updatedAt"],
+            "id = ?",
+            (document_id,),
+            None,
+            1,
+        )
+        if not row:
+            raise RuntimeError("Knowledge document not found.")
+        document = row[0]
+        version_limit = int(args.get("versionLimit", 5))
+        versions = _db_fetch_limited(
+            conn,
+            "KnowledgeDocumentVersion",
+            ["id", "documentId", "versionNumber", "content", "contentHash", "charCount", "createdAt"],
+            "documentId = ?",
+            (document_id,),
+            "versionNumber desc, createdAt desc",
+            version_limit,
+        )
+        preview_chars = int(args.get("previewChars", 1200))
+        for version in versions:
+            if "content" in version:
+                version["contentPreview"] = _clip(version.pop("content"), preview_chars)
+        bindings = _db_fetch_limited(
+            conn,
+            "KnowledgeBinding",
+            ["id", "targetType", "targetId", "documentId", "createdAt"],
+            "documentId = ?",
+            (document_id,),
+            "createdAt desc",
+            20,
+        )
+    return {"source": "sqlite_readonly", "document": document, "versions": versions, "bindings": bindings}
+
+
+def tool_knowledge_create_document(args):
+    _ensure_backend_for_write(args)
+    title = (args.get("title") or "").strip() or None
+    file_name = (args.get("fileName") or "").strip()
+    content = args.get("content") or ""
+    if not file_name:
+        raise RuntimeError("fileName 不能为空。")
+    if not str(content).strip():
+        raise RuntimeError("content 不能为空。")
+    body = {"fileName": file_name, "content": str(content)}
+    if title:
+        body["title"] = title
+    data = _unwrap(_api("POST", "/api/knowledge/documents", body, timeout=int(args.get("timeoutSeconds", 45))))
+    return {"created": True, "document": data}
+
+
+def tool_knowledge_create_version(args):
+    _ensure_backend_for_write(args)
+    document_id = (args.get("documentId") or "").strip()
+    content = args.get("content") or ""
+    if not document_id:
+        raise RuntimeError("documentId 不能为空。")
+    if not str(content).strip():
+        raise RuntimeError("content 不能为空。")
+    body = {"content": str(content)}
+    if args.get("fileName"):
+        body["fileName"] = args.get("fileName")
+    data = _unwrap(_api("POST", f"/api/knowledge/documents/{urllib.parse.quote(document_id)}/versions", body, timeout=int(args.get("timeoutSeconds", 45))))
+    return {"createdVersion": True, "document": data}
+
+
+def tool_knowledge_reindex_document(args):
+    _ensure_backend_for_write(args)
+    document_id = (args.get("documentId") or "").strip()
+    if not document_id:
+        raise RuntimeError("documentId 不能为空。")
+    data = _unwrap(_api("POST", f"/api/knowledge/documents/{urllib.parse.quote(document_id)}/reindex", timeout=int(args.get("timeoutSeconds", 45))))
+    return {"queued": True, "document": data}
+
+
+def tool_knowledge_recall_test(args):
+    _ensure_backend_for_write(args)
+    document_id = (args.get("documentId") or "").strip()
+    query = (args.get("query") or "").strip()
+    if not document_id:
+        raise RuntimeError("documentId 不能为空。")
+    if not query:
+        raise RuntimeError("query 不能为空。")
+    body = {"query": query, "limit": int(args.get("limit", 5))}
+    data = _unwrap(_api("POST", f"/api/knowledge/documents/{urllib.parse.quote(document_id)}/recall-test", body, timeout=int(args.get("timeoutSeconds", 45))))
+    return {"tested": True, "result": data}
+
+
+def tool_book_analysis_list(args):
+    limit = int(args.get("limit", 20))
+    status = args.get("status")
+    document_id = args.get("documentId")
+    keyword = (args.get("keyword") or "").strip()
+    if not args.get("offline") and find_base_url():
+        query = {}
+        if status:
+            query["status"] = status
+        if document_id:
+            query["documentId"] = document_id
+        if keyword:
+            query["keyword"] = keyword
+        path = "/api/book-analysis"
+        if query:
+            path += "?" + urllib.parse.urlencode(query)
+        data = _unwrap(_api("GET", path, timeout=12))
+        if isinstance(data, list):
+            return {"source": "api", "items": data[:limit], "count": len(data)}
+        return {"source": "api", "data": data}
+    with _db_connect(read_only=True) as conn:
+        where = []
+        params = []
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        if document_id:
+            where.append("documentId = ?")
+            params.append(document_id)
+        if keyword:
+            where.append("title like ?")
+            params.append(f"%{keyword}%")
+        rows = _db_fetch_limited(
+            conn,
+            "BookAnalysis",
+            ["id", "documentId", "documentVersionId", "title", "status", "summary", "provider", "model", "temperature", "maxTokens", "progress", "pendingManualRecovery", "heartbeatAt", "currentStage", "currentItemKey", "currentItemLabel", "attemptCount", "maxAttempts", "lastError", "lastRunAt", "publishedDocumentId", "createdAt", "updatedAt"],
+            " and ".join(where),
+            tuple(params),
+            "updatedAt desc",
+            limit,
+        )
+        for row in rows:
+            row["sectionCount"] = _db_count(conn, "BookAnalysisSection", "analysisId = ?", (row["id"],))
+    return {"source": "sqlite_readonly", "items": rows, "count": len(rows)}
+
+
+def tool_book_analysis_get(args):
+    analysis_id = (args.get("analysisId") or "").strip()
+    if not analysis_id:
+        raise RuntimeError("analysisId 不能为空。")
+    if not args.get("offline") and find_base_url():
+        data = _unwrap(_api("GET", f"/api/book-analysis/{urllib.parse.quote(analysis_id)}", timeout=12))
+        return {"source": "api", "analysis": data}
+    preview_chars = int(args.get("previewChars", 1200))
+    with _db_connect(read_only=True) as conn:
+        rows = _db_fetch_limited(
+            conn,
+            "BookAnalysis",
+            ["id", "documentId", "documentVersionId", "title", "status", "summary", "provider", "model", "temperature", "maxTokens", "progress", "pendingManualRecovery", "heartbeatAt", "currentStage", "currentItemKey", "currentItemLabel", "attemptCount", "maxAttempts", "lastError", "lastRunAt", "publishedDocumentId", "createdAt", "updatedAt"],
+            "id = ?",
+            (analysis_id,),
+            None,
+            1,
+        )
+        if not rows:
+            raise RuntimeError("Book analysis not found.")
+        sections = _db_fetch_limited(
+            conn,
+            "BookAnalysisSection",
+            ["id", "analysisId", "sectionKey", "title", "status", "aiContent", "editedContent", "notes", "structuredDataJson", "evidenceJson", "frozen", "sortOrder", "updatedAt"],
+            "analysisId = ?",
+            (analysis_id,),
+            "sortOrder asc",
+            20,
+        )
+        for section in sections:
+            for key in ("aiContent", "editedContent", "notes"):
+                if key in section and section[key] is not None:
+                    section[key + "Preview"] = _clip(section.pop(key), preview_chars)
+    return {"source": "sqlite_readonly", "analysis": rows[0], "sections": sections}
+
+
+def tool_book_analysis_create(args):
+    _ensure_backend_for_write(args)
+    document_id = (args.get("documentId") or "").strip()
+    if not document_id:
+        raise RuntimeError("documentId 不能为空。")
+    body = {"documentId": document_id}
+    for key in ("versionId", "provider", "model", "temperature", "maxTokens", "includeTimeline", "enabledSectionKeys"):
+        if key in args and args[key] is not None:
+            body[key] = args[key]
+    data = _unwrap(_api("POST", "/api/book-analysis", body, timeout=int(args.get("timeoutSeconds", 90))))
+    return {"created": True, "analysis": data}
+
+
+def tool_book_analysis_publish(args):
+    _ensure_backend_for_write(args)
+    analysis_id = (args.get("analysisId") or "").strip()
+    novel_id = _novel_id(args)
+    if not analysis_id:
+        raise RuntimeError("analysisId 不能为空。")
+    data = _unwrap(_api("POST", f"/api/book-analysis/{urllib.parse.quote(analysis_id)}/publish", {"novelId": novel_id}, timeout=int(args.get("timeoutSeconds", 45))))
+    return {"published": True, "result": data}
+
+
+def tool_book_analysis_export(args):
+    _ensure_backend_for_write(args)
+    analysis_id = (args.get("analysisId") or "").strip()
+    fmt = args.get("format") or "markdown"
+    if not analysis_id:
+        raise RuntimeError("analysisId 不能为空。")
+    base = find_base_url()
+    if not base:
+        raise RuntimeError("AI Novel 后端未运行。")
+    url = f"{base}/api/book-analysis/{urllib.parse.quote(analysis_id)}/export?{urllib.parse.urlencode({'format': fmt})}"
+    req = urllib.request.Request(url, method="GET", headers={"Accept": "text/markdown, application/json, text/plain"})
+    with urllib.request.urlopen(req, timeout=int(args.get("timeoutSeconds", 45))) as response:
+        raw = response.read().decode("utf-8", errors="replace")
+        content_type = response.headers.get("Content-Type", "")
+    return {"analysisId": analysis_id, "format": fmt, "contentType": content_type, "content": _clip(raw, int(args.get("previewChars", 6000)))}
+
+
 def tool_update_chapter_brief(args):
     _ensure_backend_for_write(args)
     novel_id = _novel_id(args)
@@ -1820,6 +2086,167 @@ TOOLS = {
             },
         },
         "handler": tool_read_ledgers,
+    },
+    "ai_novel_knowledge_list_documents": {
+        "description": "List AI Novel knowledge documents with version, binding, book-analysis, and index status; read-only by default and works offline from SQLite.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "keyword": {"type": "string"},
+                "status": {"type": "string", "enum": ["enabled", "disabled", "archived"]},
+                "limit": {"type": "integer", "default": 20},
+                "offline": {"type": "boolean", "default": False},
+            },
+        },
+        "handler": tool_knowledge_list_documents,
+    },
+    "ai_novel_knowledge_get_document": {
+        "description": "Read an AI Novel knowledge document detail, versions, previews, and bindings.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["documentId"],
+            "properties": {
+                "documentId": {"type": "string"},
+                "versionLimit": {"type": "integer", "default": 5},
+                "previewChars": {"type": "integer", "default": 1200},
+                "offline": {"type": "boolean", "default": False},
+            },
+        },
+        "handler": tool_knowledge_get_document,
+    },
+    "ai_novel_knowledge_create_document": {
+        "description": "Create a local AI Novel knowledge document for private writing assets; queues indexing when RAG is enabled.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["fileName", "content"],
+            "properties": {
+                "title": {"type": "string"},
+                "fileName": {"type": "string"},
+                "content": {"type": "string"},
+                "timeoutSeconds": {"type": "integer", "default": 45},
+                "autoStart": {"type": "boolean", "default": True},
+            },
+        },
+        "handler": tool_knowledge_create_document,
+    },
+    "ai_novel_knowledge_create_version": {
+        "description": "Append a new version to an existing AI Novel knowledge document.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["documentId", "content"],
+            "properties": {
+                "documentId": {"type": "string"},
+                "fileName": {"type": "string"},
+                "content": {"type": "string"},
+                "timeoutSeconds": {"type": "integer", "default": 45},
+                "autoStart": {"type": "boolean", "default": True},
+            },
+        },
+        "handler": tool_knowledge_create_version,
+    },
+    "ai_novel_knowledge_reindex_document": {
+        "description": "Queue a rebuild of one AI Novel knowledge document's RAG index.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["documentId"],
+            "properties": {
+                "documentId": {"type": "string"},
+                "timeoutSeconds": {"type": "integer", "default": 45},
+                "autoStart": {"type": "boolean", "default": True},
+            },
+        },
+        "handler": tool_knowledge_reindex_document,
+    },
+    "ai_novel_knowledge_recall_test": {
+        "description": "Test whether a knowledge document can recall relevant chunks for a query.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["documentId", "query"],
+            "properties": {
+                "documentId": {"type": "string"},
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "default": 5},
+                "timeoutSeconds": {"type": "integer", "default": 45},
+                "autoStart": {"type": "boolean", "default": True},
+            },
+        },
+        "handler": tool_knowledge_recall_test,
+    },
+    "ai_novel_book_analysis_list": {
+        "description": "List book-analysis jobs/results used for studying reference novels and publishing insights back to knowledge.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "keyword": {"type": "string"},
+                "status": {"type": "string", "enum": ["draft", "queued", "running", "succeeded", "failed", "cancelled", "archived"]},
+                "documentId": {"type": "string"},
+                "limit": {"type": "integer", "default": 20},
+                "offline": {"type": "boolean", "default": False},
+            },
+        },
+        "handler": tool_book_analysis_list,
+    },
+    "ai_novel_book_analysis_get": {
+        "description": "Read a book-analysis detail and section previews.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["analysisId"],
+            "properties": {
+                "analysisId": {"type": "string"},
+                "previewChars": {"type": "integer", "default": 1200},
+                "offline": {"type": "boolean", "default": False},
+            },
+        },
+        "handler": tool_book_analysis_get,
+    },
+    "ai_novel_book_analysis_create": {
+        "description": "Create a book-analysis job from a knowledge document. Use for private competitor/reference study before publishing insights into a novel knowledge base.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["documentId"],
+            "properties": {
+                "documentId": {"type": "string"},
+                "versionId": {"type": "string"},
+                "provider": {"type": "string"},
+                "model": {"type": "string"},
+                "temperature": {"type": "number"},
+                "maxTokens": {"type": "integer"},
+                "includeTimeline": {"type": "boolean", "default": False},
+                "enabledSectionKeys": {"type": "array", "items": {"type": "string"}},
+                "timeoutSeconds": {"type": "integer", "default": 90},
+                "autoStart": {"type": "boolean", "default": True},
+            },
+        },
+        "handler": tool_book_analysis_create,
+    },
+    "ai_novel_book_analysis_publish": {
+        "description": "Publish a completed book-analysis into the current novel's knowledge assets.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["analysisId"],
+            "properties": {
+                "analysisId": {"type": "string"},
+                "novelId": {"type": "string"},
+                "timeoutSeconds": {"type": "integer", "default": 45},
+                "autoStart": {"type": "boolean", "default": True},
+            },
+        },
+        "handler": tool_book_analysis_publish,
+    },
+    "ai_novel_book_analysis_export": {
+        "description": "Export a book-analysis as markdown or JSON preview.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["analysisId"],
+            "properties": {
+                "analysisId": {"type": "string"},
+                "format": {"type": "string", "enum": ["markdown", "json"], "default": "markdown"},
+                "previewChars": {"type": "integer", "default": 6000},
+                "timeoutSeconds": {"type": "integer", "default": 45},
+                "autoStart": {"type": "boolean", "default": True},
+            },
+        },
+        "handler": tool_book_analysis_export,
     },
     "ai_novel_update_chapter_brief": {
         "description": "Update chapter planning fields such as expectation, taskSheet, sceneCards, mustAvoid, targetWordCount.",
