@@ -1,0 +1,2 @@
+scan_log rows: [(1, 'all', 'local_scan', 'all', 0, '2026-06-10T15:14:04.044263')]
+sqlite_sequence rows: [('scan_log', 1)]

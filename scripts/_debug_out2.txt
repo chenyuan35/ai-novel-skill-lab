@@ -1,0 +1,7 @@
+Tables: [('novels',), ('sqlite_sequence',), ('trope_stats',), ('scan_log',)]
+  novels: 0 rows
+  sqlite_sequence: 1 rows
+  trope_stats: 0 rows
+  scan_log: 1 rows
+
+novels columns: [('id', 'INTEGER'), ('platform', 'TEXT'), ('novel_id', 'TEXT'), ('novel_name', 'TEXT'), ('author', 'TEXT'), ('description', 'TEXT'), ('tags', 'TEXT'), ('status', 'TEXT'), ('chapter_count', 'INTEGER'), ('word_count', 'INTEGER'), ('rating', 'REAL'), ('source', 'TEXT'), ('search_keyword', 'TEXT'), ('crawled_at', 'TEXT'), ('raw_data', 'TEXT'), ('category', 'TEXT'), ('creation_status', 'INTEGER'), ('genre', 'TEXT'), ('genre_display', 'TEXT')]
