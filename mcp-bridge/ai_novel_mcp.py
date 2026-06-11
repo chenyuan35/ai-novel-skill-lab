@@ -42,6 +42,235 @@ LOG_PATH = Path(os.environ.get(
 ))
 DEFAULT_NOVEL_ID = os.environ.get("AI_NOVEL_DEFAULT_NOVEL_ID", "cmq2gpstg002kdodh8fan9sod")
 HEADLESS_ONLY = os.environ.get("AI_NOVEL_HEADLESS_ONLY", "1").strip().lower() in ("1", "true", "yes")
+NOVEL_PANEL_VIEW_URI = "ui://novel-panel/view.html"
+CHAPTER_READER_URI = "ui://chapter-reader/view.html"
+_CHAPTER_READER_CACHE = {"html": "", "title": "", "order": 0}
+NOVEL_PANEL_WATCHED_FILES = {
+    "NOVEL_CONCEPT_BOARD.md": "概念卡",
+    "OUTLINE.md": "大纲",
+    "CHARACTER_RULES.md": "人物",
+    "CANON.md": "世界观",
+    "AUTHOR_STYLE.md": "作者风格",
+    "DIRECTOR_NOTES.md": "导演笔记",
+    "MATERIALS.md": "素材",
+}
+
+NOVEL_PANEL_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>小说创作状态</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: #0e0e10; color: #e8e6e3; padding: 14px;
+  font-size: 13px; line-height: 1.5;
+}
+.title { font-size: 13px; color: #ff8c42; font-weight: 600; }
+.subtitle { color: #888; font-size: 11px; margin-bottom: 12px; }
+.stage {
+  background: linear-gradient(135deg, #ff8c42 0%, #e74c3c 100%);
+  color: #fff; padding: 11px 13px; border-radius: 7px; margin-bottom: 14px;
+}
+.stage-name { font-size: 14px; font-weight: 600; margin-bottom: 3px; }
+.stage-hint { font-size: 12px; opacity: 0.92; }
+.section {
+  font-size: 10px; color: #888; text-transform: uppercase;
+  letter-spacing: 1px; margin: 12px 0 6px;
+}
+.concept-box {
+  background: #1a1a1d; border: 1px solid #2a2a2e;
+  border-radius: 6px; padding: 9px 11px;
+}
+.kv { display: flex; padding: 3px 0; border-bottom: 1px solid #222; font-size: 12px; }
+.kv:last-child { border-bottom: none; }
+.k { color: #888; min-width: 72px; }
+.v { color: #e8e6e3; flex: 1; }
+.hint { color: #666; font-style: italic; padding: 8px; font-size: 12px; }
+.files { display: flex; flex-direction: column; gap: 5px; }
+.file {
+  background: #1a1a1d; border: 1px solid #2a2a2e; border-left: 3px solid #444;
+  padding: 7px 10px; border-radius: 4px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.file.filled { border-left-color: #4caf50; }
+.file.empty { opacity: 0.55; }
+.file-label { font-weight: 600; font-size: 12px; }
+.file-name { color: #666; font-size: 10px; font-family: monospace; }
+.file-meta { color: #888; font-size: 11px; }
+.refresh {
+  margin-top: 12px; padding-top: 10px; border-top: 1px solid #222;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.btn {
+  background: #2a2a2e; color: #e8e6e3; border: 1px solid #3a3a3e;
+  padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px;
+}
+.btn:hover { background: #3a3a3e; }
+.ts { color: #555; font-size: 10px; }
+</style>
+</head>
+<body>
+<div class="title">\U0001f4d6 小说创作状态</div>
+<div class="subtitle" id="proj">—</div>
+
+<div class="stage">
+  <div class="stage-name" id="stage-name">—</div>
+  <div class="stage-hint" id="stage-hint">—</div>
+</div>
+
+<div class="section">概念卡</div>
+<div id="concept"></div>
+
+<div class="section">材料库</div>
+<div class="files" id="files"></div>
+
+<div class="refresh">
+  <button class="btn" onclick="requestRefresh()">\U0001f504 刷新</button>
+  <span class="ts" id="ts">—</span>
+</div>
+
+<script>
+function renderConcept(c) {
+  const box = document.getElementById('concept');
+  const entries = Object.entries(c || {});
+  if (entries.length === 0) {
+    box.innerHTML = '<div class="hint">概念还没锁，先在对话里聊路线</div>';
+    return;
+  }
+  box.innerHTML = '<div class="concept-box">' +
+    entries.slice(0, 10).map(([k, v]) =>
+      `<div class="kv"><span class="k">${escapeHtml(k)}</span><span class="v">${escapeHtml(v)}</span></div>`
+    ).join('') + '</div>';
+}
+
+function renderFiles(files) {
+  document.getElementById('files').innerHTML = (files || []).map(f =>
+    `<div class="file ${f.status}">
+       <div>
+         <div class="file-label">${escapeHtml(f.label)}</div>
+         <div class="file-name">${escapeHtml(f.name)}</div>
+       </div>
+       <div class="file-meta">${f.status === 'empty' ? '未创建' : f.lines + ' 行'}</div>
+     </div>`
+  ).join('');
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+function applyState(state) {
+  if (!state) return;
+  document.getElementById('proj').textContent = state.project || '';
+  document.getElementById('stage-name').textContent = state.stage_name || '';
+  document.getElementById('stage-hint').textContent = state.stage_hint || '';
+  renderConcept(state.concept);
+  renderFiles(state.files);
+  document.getElementById('ts').textContent = new Date().toLocaleTimeString();
+}
+
+function requestRefresh() {
+  window.parent.postMessage({
+    jsonrpc: "2.0", id: Date.now(),
+    method: "tools/call",
+    params: { name: "show_novel_panel", arguments: {} }
+  }, '*');
+}
+
+window.addEventListener('message', (e) => {
+  const msg = e.data;
+  if (!msg) return;
+  if (msg.method === 'ui/notifications/tool-result' || msg.method === 'ui/notifications/tool-input') {
+    const result = msg.params?.result || msg.params;
+    const content = result?.structuredContent || result;
+    if (content && content.stage_name) applyState(content);
+  }
+});
+
+window.parent.postMessage({
+  jsonrpc: "2.0", id: 1,
+  method: "ui/initialize",
+  params: { protocolVersion: "2025-06-18", appCapabilities: {} }
+}, '*');
+window.parent.postMessage({
+  jsonrpc: "2.0",
+  method: "ui/notifications/initialized"
+}, '*');
+</script>
+</body>
+</html>
+"""
+
+
+def _read_md(name):
+    path = WORKSPACE / name
+    try:
+        data = path.read_text(encoding="utf-8").strip()
+        return data if data else None
+    except (FileNotFoundError, OSError):
+        return None
+    except Exception as exc:
+        return f"[读取错误: {exc}]"
+
+
+def _parse_concept(text):
+    if not text:
+        return {}
+    fields = {}
+    for line in text.split("\n"):
+        m = re.match(r"^[-*]?\s*([一-鿿\w]+)[：:]?\s*(.+)", line.strip())
+        if m:
+            k = m.group(1).strip()
+            v = m.group(2).strip()
+            if v and v not in ("", "—", "-"):
+                fields[k] = v
+    return fields
+
+
+def _detect_stage():
+    concept = _read_md("NOVEL_CONCEPT_BOARD.md")
+    outline = _read_md("OUTLINE.md")
+    characters = _read_md("CHARACTER_RULES.md")
+    if not concept:
+        return "脑洞阶段", "还没锁定概念，先聊路线"
+    if not characters:
+        return "概念已锁", "下一步：建人物"
+    if not outline:
+        return "人物已建", "下一步：搭大纲"
+    return "大纲已搭", "可以进入章节生成"
+
+
+def _novel_panel_snapshot():
+    stage_name, stage_hint = _detect_stage()
+    concept_text = _read_md("NOVEL_CONCEPT_BOARD.md")
+    concept_fields = _parse_concept(concept_text)
+    files = []
+    for fname, label in NOVEL_PANEL_WATCHED_FILES.items():
+        content = _read_md(fname)
+        if content is None:
+            files.append({"label": label, "name": fname, "status": "empty", "lines": 0})
+        else:
+            files.append({
+                "label": label,
+                "name": fname,
+                "status": "filled",
+                "lines": len(content.split("\n")),
+            })
+    return {
+        "project": os.path.basename(WORKSPACE),
+        "stage_name": stage_name,
+        "stage_hint": stage_hint,
+        "concept": concept_fields,
+        "files": files,
+    }
+
+
+def tool_show_novel_panel(args):
+    return _novel_panel_snapshot()
 
 
 def _write(message):
@@ -70,6 +299,94 @@ def _clip(text, limit=1800):
         return ""
     text = str(text)
     return text if len(text) <= limit else text[:limit] + f"\n... [truncated {len(text) - limit} chars]"
+
+
+# === Red-line guard (管线侧代码守卫，不是 prompt 软判断) ===
+# 确定性规则：生成后扫正文，命中即违规。这一层属于"管线编排层"，用代码 if-else，
+# 不要塞进 prompt 让模型自觉。见记忆 feedback-ifelse-vs-prompt。
+#
+# 全局故事红线：整本书都不该出现的说明性/越界内容。
+# 每条是 (规则名, 正则模式列表, 命中提示)。
+GLOBAL_REDLINES = [
+    (
+        "重生说明性词汇",
+        [r"重生", r"穿越", r"上一世", r"前世", r"这一世", r"重活", r"回到了?过去"],
+        "禁止直接说明重生机制；用世界偏差细节暗示，不要点破。",
+    ),
+    (
+        "前世婚姻/成年纠葛泄漏",
+        [r"离婚", r"结婚", r"前妻", r"前夫", r"投行", r"同学聚会", r"中年", r"三十岁", r"三十年", r"工作多年"],
+        "禁止把成年/前世的婚姻、职场、年龄写进初三场景，主角心理年龄只能用极少量错位暗示。",
+    ),
+    (
+        "金手指/系统",
+        [r"系统", r"面板", r"金手指", r"光脑", r"签到", r"开挂", r"作弊器"],
+        "禁止系统/面板/金手指设定，主角只能靠笨办法自救。",
+    ),
+]
+
+
+def _derive_chapter_redlines(must_avoid, task_sheet):
+    """从本章 mustAvoid / taskSheet 的'严禁/禁止/不要X'里派生确定性禁词。
+
+    只抽取能被关键词命中的硬约束，软性创作要求（笔触/节奏）不在此列。
+    """
+    rules = []
+    text = " ".join(filter(None, [must_avoid or "", task_sheet or ""]))
+    if not text:
+        return rules
+    # 角色出场限制：苏念仅限背影/发绳/翻书 → 正脸/对视/眼睛即违规
+    if re.search(r"苏念.{0,12}(仅限|只(能|限)|背影)", text) or re.search(r"(禁止|严禁|不要).{0,20}苏念.{0,12}(正脸|对视|眼神)", text):
+        rules.append((
+            "苏念出场越界(正脸/对视)",
+            [r"苏念.{0,8}(正脸|侧脸|对视|眼神|眼睛|瞳孔|看着我的眼)", r"对上.{0,4}(苏念|她).{0,4}(目光|眼)", r"她的眼(睛|神).{0,6}(看|望|盯)"],
+            "苏念本章只能背影/发绳/翻书动作，不得写正脸、眼神、对视。",
+        ))
+    # 暗恋追回线作废
+    if re.search(r"(暗恋|追回|追妻|甜宠).{0,6}(线)?.{0,6}(作废|禁止|不要|删)", text):
+        rules.append((
+            "暗恋追回线残留",
+            [r"追(回|她)", r"挽回", r"她送(给)?我", r"我们(以前|曾经|分手)", r"复合"],
+            "暗恋/追回/追妻线已作废，本章不得出现旧情追回暗示。",
+        ))
+    return rules
+
+
+def _scan_redlines(content, must_avoid=None, task_sheet=None, old_soul_limit=2):
+    """扫描正文红线，返回违规清单。纯确定性，无模型调用。"""
+    if not content:
+        return {"violations": [], "oldSoulHits": 0, "clean": True}
+    violations = []
+    rules = list(GLOBAL_REDLINES) + _derive_chapter_redlines(must_avoid, task_sheet)
+    for name, patterns, hint in rules:
+        hits = []
+        for pat in patterns:
+            for m in re.finditer(pat, content):
+                s = max(0, m.start() - 12)
+                e = min(len(content), m.end() + 12)
+                hits.append(content[s:e].replace("\n", " "))
+        if hits:
+            violations.append({
+                "rule": name,
+                "count": len(hits),
+                "samples": hits[:5],
+                "hint": hint,
+            })
+    # 老灵魂细节密度：统计"前世/记忆里/这不对劲/和记忆不一样"类对照次数
+    old_soul_pat = r"(记忆(里|中)|和记忆|不该|不对劲|本该|原本的记忆|印象(里|中))"
+    old_soul_hits = len(re.findall(old_soul_pat, content))
+    if old_soul_hits > old_soul_limit:
+        violations.append({
+            "rule": f"老灵魂对照过密(>{old_soul_limit})",
+            "count": old_soul_hits,
+            "samples": [m.group(0) for m in list(re.finditer(old_soul_pat, content))[:5]],
+            "hint": f"世界偏差/老灵魂对照一章最多 {old_soul_limit} 处，当前 {old_soul_hits} 处，需大幅删减。",
+        })
+    return {
+        "violations": violations,
+        "oldSoulHits": old_soul_hits,
+        "clean": len(violations) == 0,
+    }
 
 
 def _ensure_bridge_dirs():
@@ -900,20 +1217,100 @@ def tool_get_chapter(args):
     }
 
 
+def tool_read_chapter_full(args):
+    """返回整章完整正文，同时自动生成 HTML 预览文件供 preview 面板显示。
+
+    Claude 收到结果后必须：
+    1. 用 preview_start 启动 novel-reader 服务器
+    2. 用 preview_eval 导航到 previewUrl
+    3. 用 AskUserQuestion 弹出「通过 / 不通过 / 其他」选择框
+    4. 根据用户选择标记章节状态
+    """
+    novel_id = _novel_id(args)
+    chapter = _find_chapter(novel_id, args.get("chapterId"), args.get("order"))
+    content = chapter.get("content") or ""
+    if not content:
+        raise RuntimeError("该章节没有正文内容。")
+    order = int(chapter.get("order") or 0)
+    title = str(chapter.get("title") or f"第{order}章")
+    status = str(chapter.get("chapterStatus") or "")
+    target = chapter.get("targetWordCount") or 0
+
+    # 自动生成 HTML 预览文件（UTF-8，中文不乱码）
+    import html as _html
+    html_content = (
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        f'<title>{_html.escape(title)}</title>'
+        '<style>body{font-family:"Microsoft YaHei",sans-serif;padding:20px;'
+        'line-height:1.8;font-size:15px;white-space:pre-wrap;max-width:700px;margin:0 auto}'
+        'h1{font-size:18px;border-bottom:1px solid #ccc;padding-bottom:8px}'
+        '.meta{color:#888;font-size:13px;margin-bottom:16px}'
+        '</style></head><body>'
+        f'<h1>第{order}章 {_html.escape(title)}</h1>'
+        f'<div class="meta">状态: {_html.escape(status)} | 目标: {target}字 | 实际: {len(content)}字</div>'
+        f'{_html.escape(content)}'
+        '</body></html>'
+    )
+    drafts_dir = DRAFTS_DIR
+    drafts_dir.mkdir(parents=True, exist_ok=True)
+    html_path = drafts_dir / f"ch{order}.html"
+    html_path.write_text(html_content, encoding="utf-8")
+    preview_url = f"http://localhost:8765/ch{order}.html"
+
+    # 渲染指令：告诉 Claude 必须执行的完整流程
+    rendered = (
+        f"【交互式章节审阅流程 — 必须严格执行】\n\n"
+        f"第{order}章「{title}」已生成（{len(content)}字，状态: {status}）\n\n"
+        f"执行步骤：\n"
+        f"1. 调用 preview_start(name='novel-reader') 启动预览服务器\n"
+        f"2. 调用 preview_eval 执行 window.location.href = '/ch{order}.html'\n"
+        f"3. 用户在右侧 preview 面板读正文\n"
+        f"4. 调用 AskUserQuestion 弹出选择框，选项：通过 / 不通过 / 其他\n"
+        f"5. 用户选择「通过」→ 调用 update_chapter_brief 设置 chapterStatus='completed'\n"
+        f"   用户选择「不通过」→ 记录修改意见，重新生成\n"
+        f"   用户选择「其他」→ 按用户指示处理\n\n"
+        f"Preview URL: {preview_url}\n"
+        f"HTML 文件: {html_path}\n"
+    )
+    return {
+        "renderMarkdown": rendered,
+        "previewUrl": preview_url,
+        "htmlPath": str(html_path),
+        "meta": {
+            "id": chapter.get("id"),
+            "order": order,
+            "title": title,
+            "status": status,
+            "targetWordCount": target,
+            "contentLength": len(content),
+        },
+    }
+
+
 def tool_get_chapter_sample(args):
     novel_id = _novel_id(args)
     chapter = _db_find_chapter(novel_id, args.get("chapterId"), args.get("order"))
     sample_chars = int(args.get("sampleChars", 6000))
     path = _save_sample_file(novel_id, chapter)
     content = chapter.get("content") or ""
+    order = int(chapter.get("order") or 0)
+    title = str(chapter.get("title") or "")
+    status = str(chapter.get("chapterStatus") or "")
+    # Rendering instruction for Claude Desktop artifact
+    payload = (
+        f"【渲染指令】请将下面 --- 分隔线之间的全部正文,作为一个标题为「第{order}章 {title}」的 "
+        f"Markdown 文档 artifact 完整输出,保持原文不变。对话里只需说'第{order}章已在右侧画布打开'。\n\n---\n\n"
+        f"# 第{order}章 {title}\n\n{content}\n\n---"
+    )
     return {
         "chapterId": chapter.get("id"),
-        "order": chapter.get("order"),
-        "title": chapter.get("title"),
-        "status": chapter.get("chapterStatus"),
+        "order": order,
+        "title": title,
+        "status": status,
         "contentLength": len(content),
         "samplePath": str(path),
         "sample": _clip(content, sample_chars),
+        "artifact_markdown": payload,
     }
 
 
@@ -1741,6 +2138,23 @@ def tool_generate_chapter(args):
     novel_id = _novel_id(args)
     chapter = _find_chapter(novel_id, args.get("chapterId"), args.get("order"))
     chapter_id = chapter["id"]
+    chapter_order = int(chapter.get("order") or args.get("order") or 0)
+
+    # ---- Per-chapter approval gate ----
+    # Workflow: generate → sidebar → user approval → next chapter.
+    # If the previous chapter exists and is not approved, refuse.
+    if chapter_order > 1 and not args.get("force"):
+        prev = _db_find_chapter(novel_id, order=chapter_order - 1)
+        if prev:
+            prev_status = (prev.get("chapterStatus") or "").lower()
+            if prev_status not in ("completed", "approved"):
+                raise RuntimeError(
+                    "Chapter %d is not approved (status: %s). "
+                    "Read the sample to sidebar, get user approval, then generate chapter %d."
+                    % (chapter_order - 1, prev_status or "unknown", chapter_order)
+                )
+    # ---- End approval gate ----
+
     guidance = args.get("guidance", "").strip()
     if guidance:
         existing = chapter.get("taskSheet") or chapter.get("expectation") or ""
@@ -1836,6 +2250,8 @@ def run_overnight_job(config, progress=None):
                 "chapterId": result.get("chapterId"),
                 "afterLength": result.get("afterLength"),
                 "samplePath": result.get("samplePath"),
+                "redlineClean": result.get("redlineClean", True),
+                "redlineViolations": [v["rule"] for v in (result.get("redline") or {}).get("violations", [])],
             })
             if progress:
                 progress({"event": "chapter_done", "order": order, "result": completed[-1], "time": time.strftime("%Y-%m-%d %H:%M:%S")})
@@ -2244,7 +2660,17 @@ TOOLS = {
         "handler": tool_get_chapter,
     },
     "ai_novel_get_chapter_sample": {
-        "description": "Read a chapter from the local SQLite database, save a Markdown sample file, and return a preview for Claude to show in chat.",
+        "description": (
+            "读取指定章节正文，生成 HTML 预览文件，在右侧 preview 面板显示，并弹出交互式审批选择框。\n\n"
+            "【必须严格执行的交互式审阅流程】\n"
+            "1. 调用 preview_start(name='novel-reader') 启动预览服务器\n"
+            "2. 调用 preview_eval 执行 window.location.href = '/ch{N}.html' 在右侧显示\n"
+            "3. 调用 AskUserQuestion 弹出选择框，选项：通过 / 不通过 / 其他\n"
+            "4. 用户选择「通过」→ 调用 ai_novel_update_chapter_brief 设置 chapterStatus='completed'\n"
+            "   用户选择「不通过」→ 记录修改意见，重新生成\n"
+            "   用户选择「其他」→ 按用户指示处理\n\n"
+            "禁止：跳过 AskUserQuestion；在对话里打印正文；跳过 preview 面板。"
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2255,6 +2681,28 @@ TOOLS = {
             },
         },
         "handler": tool_get_chapter_sample,
+    },
+    "ai_novel_read_chapter_full": {
+        "description": (
+            "读取指定章节的完整正文，在右侧 preview 面板显示，并弹出交互式审批选择框。\n\n"
+            "【必须严格执行的交互式审阅流程】\n"
+            "1. 调用 preview_start(name='novel-reader') 启动预览服务器\n"
+            "2. 调用 preview_eval 执行 window.location.href = '/ch{N}.html' 在右侧显示\n"
+            "3. 调用 AskUserQuestion 弹出选择框，选项：通过 / 不通过 / 其他\n"
+            "4. 用户选择「通过」→ 调用 ai_novel_update_chapter_brief 设置 chapterStatus='completed'\n"
+            "   用户选择「不通过」→ 记录修改意见，重新生成\n"
+            "   用户选择「其他」→ 按用户指示处理\n\n"
+            "禁止：跳过 AskUserQuestion；在对话里打印正文；跳过 preview 面板。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "novelId": {"type": "string"},
+                "chapterId": {"type": "string"},
+                "order": {"type": "integer"},
+            },
+        },
+        "handler": tool_read_chapter_full,
     },
     "ai_novel_style_context": {
         "description": "Read active style profiles and character briefs from the local AI Novel database for style-aware writing.",
@@ -2714,6 +3162,25 @@ TOOLS = {
         },
         "handler": tool_overnight_status,
     },
+    "show_novel_panel": {
+        "description": (
+            "在对话流里渲染小说创作状态面板，显示当前阶段、概念卡、材料库进度。\n\n"
+            "【交互式小说创作工作流 — 全程纯自然语言，不用斜杠命令】\n"
+            "每个节点都要：sidebar 展示内容 + AskUserQuestion 弹选择框\n\n"
+            "1. 脑洞/路线：给出 2-4 条路线，AskUserQuestion 让用户选\n"
+            "2. 角色设定：preview 面板显示人设卡，AskUserQuestion 确认/修改\n"
+            "3. 大纲：preview 面板显示大纲，AskUserQuestion 逐卷确认\n"
+            "4. 章节生成：ai_novel_read_chapter_full 生成 HTML → preview 显示 → AskUserQuestion 通过/不通过/其他\n"
+            "5. 修改：用户选不通过时，讨论修改方向，再弹选择框确认\n\n"
+            "技术：sidebar 用 preview_start + preview_eval；选择框用 AskUserQuestion。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+        "meta": {"ui": {"resourceUri": NOVEL_PANEL_VIEW_URI}},
+        "handler": tool_show_novel_panel,
+    },
 }
 
 
@@ -2723,7 +3190,7 @@ def handle(request):
     if method == "initialize":
         return _result(request_id, {
             "protocolVersion": "2024-11-05",
-            "capabilities": {"tools": {}},
+            "capabilities": {"tools": {}, "resources": {}},
             "serverInfo": {"name": "ai-novel-writing-assistant-v2", "version": "0.1.0"},
         })
     if method == "notifications/initialized":
@@ -2746,12 +3213,58 @@ def handle(request):
             return _error(request_id, -32602, f"Unknown tool: {name}")
         try:
             value = TOOLS[name]["handler"](args)
+            # If tool returns renderMarkdown, send it as plain text (not JSON)
+            # so Claude can render it as an artifact in the sidebar/canvas.
+            if isinstance(value, dict) and "renderMarkdown" in value:
+                return _result(request_id, _text_result(value["renderMarkdown"]))
             return _result(request_id, _text_result(_json_text(value)))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             return _result(request_id, _text_result(f"HTTP {exc.code}: {_clip(detail, 3000)}"))
         except Exception as exc:
             return _result(request_id, _text_result(f"ERROR: {exc}"))
+    if method == "resources/list":
+        return _result(request_id, {
+            "resources": [
+                {
+                    "uri": NOVEL_PANEL_VIEW_URI,
+                    "name": "小说创作状态面板",
+                    "description": "展示当前项目阶段、概念卡和材料库进度。",
+                    "mimeType": "text/html;profile=mcp-app",
+                },
+                {
+                    "uri": CHAPTER_READER_URI,
+                    "name": "章节阅读器",
+                    "description": "在 sidebar 显示当前章节正文，供用户阅读审校。",
+                    "mimeType": "text/html;profile=mcp-app",
+                },
+            ]
+        })
+    if method == "resources/read":
+        params = request.get("params") or {}
+        uri = params.get("uri", "")
+        if uri == NOVEL_PANEL_VIEW_URI:
+            return _result(request_id, {
+                "contents": [
+                    {
+                        "uri": uri,
+                        "mimeType": "text/html;profile=mcp-app",
+                        "text": NOVEL_PANEL_HTML,
+                    }
+                ]
+            })
+        if uri == CHAPTER_READER_URI:
+            html = _CHAPTER_READER_CACHE.get("html") or "<html><body style='background:#0e0e10;color:#e8e6e3;font-family:sans-serif;padding:20px'><p>还没有章节内容。请先调用 get_chapter_sample。</p></body></html>"
+            return _result(request_id, {
+                "contents": [
+                    {
+                        "uri": uri,
+                        "mimeType": "text/html;profile=mcp-app",
+                        "text": html,
+                    }
+                ]
+            })
+        return _error(request_id, -32602, f"Unknown resource: {uri}")
     return _error(request_id, -32601, f"Method not found: {method}")
 
 
