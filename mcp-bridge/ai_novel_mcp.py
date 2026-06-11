@@ -3217,6 +3217,8 @@ def handle(request):
             # so Claude can render it as an artifact in the sidebar/canvas.
             if isinstance(value, dict) and "renderMarkdown" in value:
                 return _result(request_id, _text_result(value["renderMarkdown"]))
+            if isinstance(value, dict) and "artifact_markdown" in value:
+                return _result(request_id, _text_result(value["artifact_markdown"]))
             return _result(request_id, _text_result(_json_text(value)))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
