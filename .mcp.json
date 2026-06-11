@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "ai-novel-writing-assistant": {
+      "command": "python",
+      "args": [
+        "mcp-bridge/ai_novel_mcp.py"
+      ],
+      "env": {
+        "AI_NOVEL_HEADLESS_ONLY": "1"
+      }
+    }
+  }
+}

@@ -3184,6 +3184,42 @@ TOOLS = {
 }
 
 
+CLI_USAGE = """Usage:
+  python mcp-bridge/ai_novel_mcp.py --help
+  python mcp-bridge/ai_novel_mcp.py list-tools [--json]
+  python mcp-bridge/ai_novel_mcp.py healthcheck [--start]
+  python mcp-bridge/ai_novel_mcp.py bootstrap [sampleOrder]
+  python mcp-bridge/ai_novel_mcp.py status
+  python mcp-bridge/ai_novel_mcp.py start [headless|desktop]
+  python mcp-bridge/ai_novel_mcp.py stop
+  python mcp-bridge/ai_novel_mcp.py sample <order>
+  python mcp-bridge/ai_novel_mcp.py model-config
+  python mcp-bridge/ai_novel_mcp.py set-current-model <provider> <model>
+  python mcp-bridge/ai_novel_mcp.py overnight-start [json_file]
+  python mcp-bridge/ai_novel_mcp.py overnight-status
+  python mcp-bridge/ai_novel_mcp.py overnight-run <config_json>
+  python mcp-bridge/ai_novel_mcp.py run-request [json_file]
+
+No command starts the MCP stdio server for Claude/Codex hosts.
+"""
+
+
+def _list_cli_tools(as_json=False):
+    rows = [
+        {
+            "name": name,
+            "description": spec["description"].splitlines()[0],
+        }
+        for name, spec in TOOLS.items()
+    ]
+    if as_json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return
+    print(f"{len(rows)} MCP tools:")
+    for row in rows:
+        print(f"- {row['name']}: {row['description']}")
+
+
 def handle(request):
     method = request.get("method")
     request_id = request.get("id")
@@ -3287,7 +3323,13 @@ def main():
 
 
 def run_cli(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(CLI_USAGE)
+        return
     command = argv[0]
+    if command == "list-tools":
+        _list_cli_tools(as_json="--json" in argv)
+        return
     if command == "healthcheck":
         print(_json_text(tool_healthcheck({"autoStart": "--start" in argv})))
         return
@@ -3360,7 +3402,7 @@ def run_cli(argv):
             raise RuntimeError(f"Unsupported bridge request action: {action}")
         print(_json_text(result))
         return
-    raise RuntimeError("Usage: ai_novel_mcp.py healthcheck [--start] | bootstrap [sampleOrder] | status | start [headless|desktop] | stop | sample <order> | model-config | set-current-model <provider> <model> | overnight-start [json_file] | overnight-status | run-request [json_file]")
+    raise RuntimeError(CLI_USAGE)
 
 
 def _extract_bridge_request(text):
